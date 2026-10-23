@@ -1,5 +1,4 @@
 import { createServer } from "node:http";
-import { DatabaseSync } from "node:sqlite";
 import {
   createHash,
   createHmac,
@@ -32,14 +31,19 @@ const dataDir = path.resolve(root, process.env.DATA_DIR ?? "./data");
 mkdirSync(dataDir, { recursive: true });
 
 const isProduction = process.env.NODE_ENV === "production";
+const supabaseUrl = (process.env.SUPABASE_URL ?? "").replace(/\/+$/, "");
+const supabaseServiceKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error("Set SUPABASE_URL and a server-only SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY) in .env.");
+}
 if (isProduction) {
-  const required = ["ADMIN_EMAIL", "ADMIN_PASSWORD", "JWT_SECRET", "AUDIT_SECRET", "OTP_SECRET"];
+  const required = ["ADMIN_EMAIL", "ADMIN_PASSWORD", "JWT_SECRET", "OTP_SECRET", "SUPABASE_URL"];
   const missing = required.filter((key) => !process.env[key]);
-  const secretNames = ["JWT_SECRET", "AUDIT_SECRET", "OTP_SECRET"];
+  const secretNames = ["JWT_SECRET", "OTP_SECRET"];
   const weakSecrets = secretNames.filter((key) => (process.env[key] ?? "").length < 32 || /replace-with|change-this/i.test(process.env[key] ?? ""));
   const distinctSecrets = new Set(secretNames.map((key) => process.env[key])).size === secretNames.length;
   if (missing.length || weakSecrets.length || !distinctSecrets || (process.env.ADMIN_PASSWORD ?? "").length < 14 || /change-|replace-with/i.test(process.env.ADMIN_PASSWORD ?? "")) {
-    throw new Error("Production requires ADMIN_EMAIL, a non-placeholder ADMIN_PASSWORD of at least 14 characters, and unique non-placeholder JWT_SECRET, AUDIT_SECRET, and OTP_SECRET values of at least 32 characters each.");
+    throw new Error("Production requires ADMIN_EMAIL, a non-placeholder ADMIN_PASSWORD of at least 14 characters, and distinct non-placeholder JWT_SECRET and OTP_SECRET values of at least 32 characters each.");
   }
 }
 
@@ -54,7 +58,7 @@ if (existsSync(localSecretPath)) {
   }
 }
 let localSecretChanged = false;
-for (const key of ["JWT_SECRET", "AUDIT_SECRET", "OTP_SECRET"]) {
+for (const key of ["JWT_SECRET", "OTP_SECRET"]) {
   if (!process.env[key] && (typeof localSecrets[key] !== "string" || !/^[0-9a-f]{64}$/i.test(localSecrets[key]))) {
     localSecrets[key] = randomBytes(32).toString("hex");
     localSecretChanged = true;
@@ -62,65 +66,7 @@ for (const key of ["JWT_SECRET", "AUDIT_SECRET", "OTP_SECRET"]) {
 }
 if (localSecretChanged) writeFileSync(localSecretPath, `${JSON.stringify(localSecrets, null, 2)}\n`, secretFileExisted ? {} : { flag: "wx", mode: 0o600 });
 const jwtSecret = process.env.JWT_SECRET || localSecrets.JWT_SECRET;
-const auditSecret = process.env.AUDIT_SECRET || localSecrets.AUDIT_SECRET;
 const otpSecret = process.env.OTP_SECRET || localSecrets.OTP_SECRET;
-const db = new DatabaseSync(path.join(dataDir, "voting.sqlite"));
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS admins (
-    id INTEGER PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    salt TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS voters (
-    id INTEGER PRIMARY KEY,
-    full_name TEXT NOT NULL,
-    organization_id TEXT NOT NULL UNIQUE,
-    email TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    otp_hash TEXT,
-    otp_expires_at TEXT,
-    otp_attempts INTEGER NOT NULL DEFAULT 0,
-    otp_verified INTEGER NOT NULL DEFAULT 0,
-    credential_issued INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS elections (
-    id INTEGER PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    starts_at TEXT NOT NULL,
-    ends_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    manifest_hash TEXT,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS candidates (
-    id INTEGER PRIMARY KEY,
-    election_id INTEGER NOT NULL REFERENCES elections(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    manifesto TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY,
-    actor TEXT NOT NULL,
-    action TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    previous_hash TEXT NOT NULL,
-    entry_hash TEXT NOT NULL
-  );
-`);
-
-const voterColumns = new Set(db.prepare("PRAGMA table_info(voters)").all().map((column) => column.name));
-if (!voterColumns.has("otp_attempts")) db.exec("ALTER TABLE voters ADD COLUMN otp_attempts INTEGER NOT NULL DEFAULT 0");
-
-function isoNow() {
-  return new Date().toISOString();
-}
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -193,88 +139,97 @@ function requireAdmin(req) {
   return session;
 }
 
-function recordAudit(actor, action, subject) {
-  const previous = db.prepare("SELECT entry_hash FROM audit_logs ORDER BY id DESC LIMIT 1").get()?.entry_hash ?? "0".repeat(64);
-  const createdAt = isoNow();
-  const message = JSON.stringify({ actor, action, subject, createdAt, previous });
-  const entryHash = createHmac("sha256", auditSecret).update(message).digest("hex");
-  db.prepare(`INSERT INTO audit_logs(actor, action, subject, created_at, previous_hash, entry_hash)
-    VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(actor, action, subject, createdAt, previous, entryHash);
-}
-
-function transaction(work) {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = work();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
-}
-
 function canonicalManifest(election, candidates) {
   return JSON.stringify({
-    electionId: Number(election.id),
+    electionId: String(election.id ?? election.election_id),
     title: election.title,
     description: election.description,
-    startsAt: election.starts_at,
-    endsAt: election.ends_at,
+    startsAt: new Date(election.startsAt ?? election.starts_at).toISOString(),
+    endsAt: new Date(election.endsAt ?? election.ends_at).toISOString(),
     candidates: candidates.map((item, index) => ({
       position: index + 1,
-      name: item.name,
+      name: item.name ?? item.display_name,
       manifesto: item.manifesto
     }))
   });
 }
 
-function getElection(id) {
-  const election = db.prepare("SELECT * FROM elections WHERE id = ?").get(id);
-  if (!election) return null;
-  const candidates = db.prepare("SELECT id, name, manifesto FROM candidates WHERE election_id = ? ORDER BY id").all(id);
-  const computedHash = hash(canonicalManifest(election, candidates));
-  return {
-    id: Number(election.id),
-    title: election.title,
-    description: election.description,
-    startsAt: election.starts_at,
-    endsAt: election.ends_at,
-    status: election.status,
-    manifestHash: election.manifest_hash ?? computedHash,
-    candidates
+async function supabaseRequest(resource, { method = "GET", body } = {}) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/${resource}`, {
+    method,
+    headers: {
+      apikey: supabaseServiceKey,
+      Authorization: `Bearer ${supabaseServiceKey}`,
+      Accept: "application/json",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" })
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(12_000)
+  });
+  const raw = await response.text();
+  let result = null;
+  if (raw) {
+    try { result = JSON.parse(raw); } catch { result = raw; }
+  }
+  if (!response.ok) {
+    const error = new Error(`Supabase request failed with HTTP ${response.status}.`);
+    error.status = response.status;
+    error.details = result;
+    throw error;
+  }
+  return result;
+}
+
+function rpc(name, args) {
+  return supabaseRequest(`rpc/${name}`, { method: "POST", body: args });
+}
+
+function hashFromBytea(value) {
+  return typeof value === "string" && value.startsWith("\\x") ? value.slice(2) : value;
+}
+
+function mapElectionRow(row, candidates) {
+  const candidateList = candidates.map((candidate) => ({
+    id: candidate.candidate_id,
+    name: candidate.display_name,
+    manifesto: candidate.manifesto
+  }));
+  const election = {
+    id: row.election_id,
+    title: row.title,
+    description: row.description,
+    startsAt: new Date(row.starts_at).toISOString(),
+    endsAt: new Date(row.ends_at).toISOString(),
+    status: row.status,
+    candidates: candidateList
   };
+  election.manifestHash = hashFromBytea(row.manifest_hash) ?? hash(canonicalManifest(election, candidateList));
+  return election;
 }
 
-function seedData() {
-  const adminCount = db.prepare("SELECT COUNT(*) AS count FROM admins").get().count;
-  if (!adminCount) {
-    const email = (process.env.ADMIN_EMAIL || "admin@demo.local").trim().toLowerCase();
-    const password = process.env.ADMIN_PASSWORD || "change-me-now";
-    const salt = randomBytes(16).toString("hex");
-    db.prepare("INSERT INTO admins(email, salt, password_hash, created_at) VALUES (?, ?, ?, ?)")
-      .run(email, salt, passwordHash(password, salt), isoNow());
-  }
-
-  const electionCount = db.prepare("SELECT COUNT(*) AS count FROM elections").get().count;
-  if (!isProduction && !electionCount) {
-    const startsAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const result = db.prepare(`INSERT INTO elections(title, description, starts_at, ends_at, status, created_at)
-      VALUES (?, ?, ?, ?, 'published', ?)`)
-      .run("Sample Student Council Election", "Fictional demo election. Ballot submission remains locked until real cryptographic components are configured.", startsAt, endsAt, isoNow());
-    const electionId = Number(result.lastInsertRowid);
-    const insertCandidate = db.prepare("INSERT INTO candidates(election_id, name, manifesto) VALUES (?, ?, ?)");
-    insertCandidate.run(electionId, "Candidate A", "A fictional candidate used only for local demonstration.");
-    insertCandidate.run(electionId, "Candidate B", "A fictional candidate used only for local demonstration.");
-    const election = db.prepare("SELECT * FROM elections WHERE id = ?").get(electionId);
-    const candidates = db.prepare("SELECT id, name, manifesto FROM candidates WHERE election_id = ? ORDER BY id").all(electionId);
-    db.prepare("UPDATE elections SET manifest_hash = ? WHERE id = ?").run(hash(canonicalManifest(election, candidates)), electionId);
-  }
+async function getElection(id) {
+  const rows = await supabaseRequest(`elections?select=election_id,title,description,starts_at,ends_at,status,manifest_hash&election_id=eq.${encodeURIComponent(id)}&limit=1`);
+  const row = rows?.[0];
+  if (!row) return null;
+  const candidates = await supabaseRequest(`candidates?select=candidate_id,display_name,manifesto,list_order&election_id=eq.${encodeURIComponent(id)}&order=list_order.asc`);
+  return mapElectionRow(row, candidates ?? []);
 }
 
-seedData();
+async function listElections(includeDrafts = false) {
+  const statusFilter = includeDrafts ? "" : "&status=neq.draft";
+  const rows = await supabaseRequest(`elections?select=election_id,title,description,starts_at,ends_at,status,manifest_hash&order=created_at.desc${statusFilter}`);
+  const result = await Promise.all((rows ?? []).map((row) => getElection(row.election_id)));
+  return result.filter(Boolean);
+}
+
+const adminEmail = (process.env.ADMIN_EMAIL || "admin@demo.local").trim().toLowerCase();
+const adminPassword = process.env.ADMIN_PASSWORD || "change-me-now";
+const adminSalt = hash(`secure-voting-admin:${adminEmail}:${jwtSecret}`).slice(0, 32);
+const configuredAdminPasswordHash = passwordHash(adminPassword, adminSalt);
+
+async function verifySupabaseConnection() {
+  await supabaseRequest("elections?select=election_id&limit=1");
+}
 
 const cryptoReadiness = Object.freeze({
   anonymousCredentialIssuer: false,
@@ -348,22 +303,22 @@ function validateOrigin(req) {
   }
 }
 
-function auditRows() {
-  return db.prepare(`SELECT id, actor, action, subject, created_at AS createdAt,
-    previous_hash AS previousHash, entry_hash AS entryHash FROM audit_logs ORDER BY id DESC LIMIT 100`).all();
-}
-
-function verifyAuditChain() {
-  const rows = db.prepare("SELECT actor, action, subject, created_at AS createdAt, previous_hash AS previousHash, entry_hash AS entryHash FROM audit_logs ORDER BY id").all();
-  let previous = "0".repeat(64);
-  for (const row of rows) {
-    if (row.previousHash !== previous) return false;
-    const message = JSON.stringify({ actor: row.actor, action: row.action, subject: row.subject, createdAt: row.createdAt, previous });
-    const expected = createHmac("sha256", auditSecret).update(message).digest("hex");
-    if (!safeEqual(row.entryHash, expected)) return false;
-    previous = row.entryHash;
-  }
-  return true;
+async function readAuditLog() {
+  const [valid, rows] = await Promise.all([
+    rpc("audit_chain_is_valid", {}),
+    supabaseRequest("audit_events?select=event_sequence,actor_kind,actor_user_id,actor_label,action_code,subject_voter_id,subject_election_id,subject_candidate_id,subject_challenge_id,occurred_at&order=event_sequence.desc&limit=100")
+  ]);
+  const logs = (rows ?? []).map((row) => {
+    const subjectId = row.subject_voter_id ?? row.subject_election_id ?? row.subject_candidate_id ?? row.subject_challenge_id ?? "—";
+    return {
+      id: row.event_sequence,
+      actor: row.actor_label ?? row.actor_user_id ?? row.actor_kind,
+      action: row.action_code,
+      subject: subjectId,
+      createdAt: row.occurred_at
+    };
+  });
+  return { valid: valid === true, logs };
 }
 
 async function handle(req, res) {
@@ -383,19 +338,20 @@ async function handle(req, res) {
     return json(res, 200, {
       status: "ok",
       project: "Privacy-Preserving E-Voting Prototype",
+      database: "supabase-postgres",
       crypto: cryptoReadiness,
       ballotSubmission: "disabled"
     });
   }
 
   if (method === "GET" && route === "/api/elections") {
-    const ids = db.prepare("SELECT id FROM elections WHERE status != 'draft' ORDER BY created_at DESC").all();
-    return json(res, 200, { elections: ids.map((row) => getElection(row.id)).filter(Boolean) });
+    return json(res, 200, { elections: await listElections(false) });
   }
 
-  const electionMatch = route.match(/^\/api\/elections\/(\d+)$/);
+  const uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+  const electionMatch = route.match(new RegExp(`^/api/elections/(${uuidPattern})$`));
   if (method === "GET" && electionMatch) {
-    const election = getElection(Number(electionMatch[1]));
+    const election = await getElection(electionMatch[1]);
     return election && election.status !== "draft" ? json(res, 200, { election }) : json(res, 404, { error: "Election not found." });
   }
 
@@ -409,25 +365,23 @@ async function handle(req, res) {
       return json(res, 400, { error: "Enter your name, organization ID, and a valid email address." });
     }
     if (isProduction) return json(res, 503, { error: "OTP delivery is not configured. Registration is unavailable." });
-    const existing = db.prepare("SELECT id, otp_verified, status FROM voters WHERE organization_id = ?").get(organizationId);
-    if (existing && (existing.otp_verified || existing.status !== "pending")) {
-      return json(res, 409, { error: "A registration already exists for this organization ID." });
-    }
     const otp = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, "0");
     const otpHash = createHmac("sha256", otpSecret).update(`${organizationId}:${otp}`).digest("hex");
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    let voterId;
-    if (existing) {
-      voterId = Number(existing.id);
-      db.prepare(`UPDATE voters SET full_name = ?, email = ?, otp_hash = ?, otp_expires_at = ?, otp_attempts = 0
-        WHERE id = ?`).run(fullName, email, otpHash, expiresAt, voterId);
-    } else {
-      const result = db.prepare(`INSERT INTO voters(full_name, organization_id, email, status, otp_hash, otp_expires_at, created_at)
-        VALUES (?, ?, ?, 'pending', ?, ?, ?)`)
-        .run(fullName, organizationId, email, otpHash, expiresAt, isoNow());
-      voterId = Number(result.lastInsertRowid);
-    }
-    return json(res, existing ? 200 : 201, { voterId, message: "Demo OTP created. In this local build it is shown below.", demoOtp: otp, expiresAt });
+    const result = await rpc("register_voter", {
+      p_organization_id: organizationId,
+      p_full_name: fullName,
+      p_email: email,
+      p_secret_hash_hex: otpHash,
+      p_expires_at: expiresAt
+    });
+    if (!result?.ok) return json(res, 409, { error: "A registration already exists for this organization ID." });
+    return json(res, result.created ? 201 : 200, {
+      voterId: result.voter_id,
+      message: "Demo OTP created. This development build shows it below; no email is sent.",
+      demoOtp: otp,
+      expiresAt
+    });
   }
 
   if (method === "POST" && route === "/api/auth/verify-otp") {
@@ -435,26 +389,17 @@ async function handle(req, res) {
     const body = await readJson(req);
     const organizationId = String(body.organizationId ?? "").trim();
     const otp = String(body.otp ?? "").trim();
-    const voter = db.prepare("SELECT id, status, otp_hash, otp_expires_at, otp_attempts FROM voters WHERE organization_id = ?").get(organizationId);
-    if (!voter || !voter.otp_hash || new Date(voter.otp_expires_at).getTime() < Date.now()) {
-      return json(res, 400, { error: "The code is invalid or has expired." });
-    }
-    if (voter.otp_attempts >= 5) {
-      db.prepare("UPDATE voters SET otp_hash = NULL, otp_expires_at = NULL WHERE id = ?").run(voter.id);
-      return json(res, 400, { error: "The code is invalid or has expired." });
-    }
+    if (!/^\d{6}$/.test(otp) || !organizationId) return json(res, 400, { error: "The code is invalid or has expired." });
     const providedHash = createHmac("sha256", otpSecret).update(`${organizationId}:${otp}`).digest("hex");
-    if (!safeEqual(providedHash, voter.otp_hash)) {
-      const attempts = voter.otp_attempts + 1;
-      db.prepare("UPDATE voters SET otp_attempts = ?, otp_hash = CASE WHEN ? >= 5 THEN NULL ELSE otp_hash END, otp_expires_at = CASE WHEN ? >= 5 THEN NULL ELSE otp_expires_at END WHERE id = ?")
-        .run(attempts, attempts, attempts, voter.id);
-      return json(res, 400, { error: "The code is invalid or has expired." });
-    }
-    db.prepare("UPDATE voters SET otp_verified = 1, otp_hash = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = ?").run(voter.id);
+    const result = await rpc("verify_voter_otp", {
+      p_organization_id: organizationId,
+      p_secret_hash_hex: providedHash
+    });
+    if (!result?.ok) return json(res, 400, { error: "The code is invalid or has expired." });
     return json(res, 200, {
       verified: true,
-      status: voter.status,
-      message: voter.status === "approved" ? "Identity channel verified." : "Identity channel verified. Eligibility still requires registrar approval."
+      status: result.status,
+      message: result.status === "approved" ? "Identity channel verified." : "Identity channel verified. Eligibility still requires registrar approval."
     });
   }
 
@@ -463,56 +408,67 @@ async function handle(req, res) {
     const body = await readJson(req);
     const email = String(body.email ?? "").trim().toLowerCase();
     const password = String(body.password ?? "");
-    const admin = db.prepare("SELECT id, email, salt, password_hash FROM admins WHERE email = ?").get(email);
-    const candidate = admin ? passwordHash(password, admin.salt) : passwordHash(password, "invalid-account-salt");
-    if (!admin || !safeEqual(candidate, admin.password_hash)) return json(res, 401, { error: "Email or password is incorrect." });
-    const token = tokenFor({ sub: String(admin.id), email: admin.email, role: "admin" });
-    recordAudit(admin.email, "admin.login", "session");
+    const candidate = passwordHash(password, adminSalt);
+    if (!safeEqual(email, adminEmail) || !safeEqual(candidate, configuredAdminPasswordHash)) return json(res, 401, { error: "Email or password is incorrect." });
+    const token = tokenFor({ sub: adminEmail, email: adminEmail, role: "admin" });
+    await rpc("audit_admin_event", { p_admin_email: adminEmail, p_action_code: "admin.login" });
     setSessionCookie(res, token);
-    return json(res, 200, { signedIn: true, email: admin.email });
+    return json(res, 200, { signedIn: true, email: adminEmail });
   }
 
   if (method === "POST" && route === "/api/admin/logout") {
     const session = sessionFor(req);
-    if (session) recordAudit(session.email, "admin.logout", "session");
+    if (session) await rpc("audit_admin_event", { p_admin_email: session.email, p_action_code: "admin.logout" });
     clearSessionCookie(res);
     return json(res, 200, { signedIn: false });
   }
 
   if (method === "GET" && route === "/api/admin/overview") {
     const admin = requireAdmin(req);
-    const counts = db.prepare(`SELECT COUNT(*) AS registered,
-      SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
-      SUM(CASE WHEN otp_verified = 1 THEN 1 ELSE 0 END) AS otpVerified FROM voters`).get();
+    const voters = await supabaseRequest("voters?select=registration_status,email_verified_at");
+    const counts = (voters ?? []).reduce((result, voter) => {
+      result.registered += 1;
+      if (voter.registration_status === "approved") result.approved += 1;
+      if (voter.email_verified_at) result.otpVerified += 1;
+      return result;
+    }, { registered: 0, approved: 0, otpVerified: 0 });
     return json(res, 200, { admin: { email: admin.email }, counts, crypto: cryptoReadiness });
   }
 
   if (method === "GET" && route === "/api/admin/voters") {
     requireAdmin(req);
-    const voters = db.prepare(`SELECT id, full_name AS fullName, organization_id AS organizationId,
-      email, status, otp_verified AS otpVerified, credential_issued AS credentialIssued, created_at AS createdAt
-      FROM voters ORDER BY created_at DESC`).all();
+    const rows = await supabaseRequest("voters?select=voter_id,full_name,organization_id,email,registration_status,email_verified_at,created_at&order=created_at.desc");
+    const voters = (rows ?? []).map((voter) => ({
+      id: voter.voter_id,
+      fullName: voter.full_name,
+      organizationId: voter.organization_id,
+      email: voter.email,
+      status: voter.registration_status,
+      otpVerified: Boolean(voter.email_verified_at),
+      credentialIssued: false,
+      createdAt: voter.created_at
+    }));
     return json(res, 200, { voters });
   }
 
   if (method === "GET" && route === "/api/admin/elections") {
     requireAdmin(req);
-    const ids = db.prepare("SELECT id FROM elections ORDER BY created_at DESC").all();
-    return json(res, 200, { elections: ids.map((row) => getElection(row.id)).filter(Boolean) });
+    return json(res, 200, { elections: await listElections(true) });
   }
 
-  const voterDecisionMatch = route.match(/^\/api\/admin\/voters\/(\d+)\/(approve|reject)$/);
+  const voterDecisionMatch = route.match(new RegExp(`^/api/admin/voters/(${uuidPattern})/(approve|reject)$`));
   if (method === "POST" && voterDecisionMatch) {
     const admin = requireAdmin(req);
-    const voterId = Number(voterDecisionMatch[1]);
+    const voterId = voterDecisionMatch[1];
     const decision = voterDecisionMatch[2] === "approve" ? "approved" : "rejected";
-    const voter = db.prepare("SELECT id, otp_verified FROM voters WHERE id = ?").get(voterId);
-    if (!voter) return json(res, 404, { error: "Voter not found." });
-    if (decision === "approved" && !voter.otp_verified) return json(res, 409, { error: "Verify the voter’s email or phone before approving eligibility." });
-    transaction(() => {
-      db.prepare("UPDATE voters SET status = ? WHERE id = ?").run(decision, voterId);
-      recordAudit(admin.email, `voter.${decision}`, String(voterId));
+    const result = await rpc("review_voter_registration", {
+      p_voter_id: voterId,
+      p_decision: decision,
+      p_admin_email: admin.email
     });
+    if (!result?.found) return json(res, 404, { error: "Voter not found." });
+    if (result.verified === false) return json(res, 409, { error: "Verify the voter’s email or phone before approving eligibility." });
+    if (!result.changed) return json(res, 409, { error: "This registration has already been reviewed." });
     return json(res, 200, { voterId, status: decision });
   }
 
@@ -536,41 +492,47 @@ async function handle(req, res) {
       return json(res, 400, { error: "Provide between 2 and 20 candidates. Names must be 2–100 characters and statements at most 1,000 characters." });
     }
     if (new Date(startsAt).getTime() >= new Date(endsAt).getTime()) return json(res, 400, { error: "The end time must be later than the start time." });
-    const electionId = transaction(() => {
-      const result = db.prepare(`INSERT INTO elections(title, description, starts_at, ends_at, status, created_at)
-        VALUES (?, ?, ?, ?, 'draft', ?)`)
-        .run(title, description, startsAt, endsAt, isoNow());
-      const newId = Number(result.lastInsertRowid);
-      const insertCandidate = db.prepare("INSERT INTO candidates(election_id, name, manifesto) VALUES (?, ?, ?)");
-      for (const candidate of candidates) insertCandidate.run(newId, String(candidate.name).trim(), String(candidate.manifesto ?? "").trim());
-      recordAudit(admin.email, "election.created", String(newId));
-      return newId;
+    const electionId = await rpc("create_election_with_candidates", {
+      p_title: title,
+      p_description: description,
+      p_starts_at: startsAt,
+      p_ends_at: endsAt,
+      p_candidates: candidates.map((candidate) => ({
+        name: String(candidate.name).trim(),
+        manifesto: String(candidate.manifesto ?? "").trim()
+      })),
+      p_admin_email: admin.email
     });
-    const election = getElection(electionId);
+    const election = await getElection(electionId);
     return json(res, 201, { election });
   }
 
-  const publishMatch = route.match(/^\/api\/admin\/elections\/(\d+)\/publish$/);
+  const publishMatch = route.match(new RegExp(`^/api/admin/elections/(${uuidPattern})/publish$`));
   if (method === "POST" && publishMatch) {
     const admin = requireAdmin(req);
-    const id = Number(publishMatch[1]);
-    const election = db.prepare("SELECT * FROM elections WHERE id = ?").get(id);
+    const id = publishMatch[1];
+    const election = await getElection(id);
     if (!election) return json(res, 404, { error: "Election not found." });
     if (election.status !== "draft") return json(res, 409, { error: "Only draft elections can be published." });
-    const complete = getElection(id);
-    if (complete.candidates.length < 2) return json(res, 409, { error: "Add at least two candidates before publishing." });
+    if (election.candidates.length < 2) return json(res, 409, { error: "Add at least two candidates before publishing." });
     const now = Date.now();
-    const status = new Date(complete.endsAt).getTime() <= now ? "closed" : new Date(complete.startsAt).getTime() <= now ? "active" : "scheduled";
-    transaction(() => {
-      db.prepare("UPDATE elections SET status = ?, manifest_hash = ? WHERE id = ?").run(status, complete.manifestHash, id);
-      recordAudit(admin.email, "election.published", `${id}:${complete.manifestHash}`);
+    const status = new Date(election.endsAt).getTime() <= now ? "closed" : new Date(election.startsAt).getTime() <= now ? "active" : "scheduled";
+    const manifestHash = hash(canonicalManifest(election, election.candidates));
+    const result = await rpc("publish_election", {
+      p_election_id: id,
+      p_status: status,
+      p_manifest_hash_hex: manifestHash,
+      p_admin_email: admin.email
     });
-    return json(res, 200, { election: getElection(id) });
+    if (!result?.found) return json(res, 404, { error: "Election not found." });
+    if (!result.draft) return json(res, 409, { error: "Only draft elections can be published." });
+    if (!result.complete) return json(res, 409, { error: "Add at least two candidates before publishing." });
+    return json(res, 200, { election: await getElection(id) });
   }
 
   if (method === "GET" && route === "/api/admin/audit-logs") {
     requireAdmin(req);
-    return json(res, 200, { valid: verifyAuditChain(), logs: auditRows() });
+    return json(res, 200, await readAuditLog());
   }
 
   if (method === "POST" && route === "/api/vote/relay") {
@@ -611,17 +573,15 @@ const server = createServer((req, res) => {
 });
 
 const port = Number(process.env.PORT ?? 4173);
+await verifySupabaseConnection();
 server.listen(port, "127.0.0.1", () => {
   console.log(`Voting prototype available at http://localhost:${port}`);
-  console.log(`Database: ${path.join(dataDir, "voting.sqlite")}`);
+  console.log("Database: Supabase Postgres");
   console.log("Cryptographic voting submission is disabled until real verifiers are configured.");
 });
 
 function shutdown() {
-  server.close(() => {
-    db.close();
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

@@ -3,15 +3,15 @@
 ## Prototype delivered in this repository
 
 - Voter-facing election list and registration flow. The development-only OTP is displayed on screen; production registration is unavailable until a delivery provider is configured.
-- Administrator sign-in, pending voter review, election draft creation, manifest freeze on publish, and HMAC-linked local audit log.
+- Administrator sign-in, pending voter review, election draft creation, manifest freeze on publish, and a Postgres-backed append-only audit chain.
 - A browser check that recomputes each election manifest hash from the API response.
-- A same-origin Node API with SQLite persistence, request limits, input bounds, session cookies, security headers, and stable local development secrets.
+- A same-origin Node API connected to Supabase Postgres, with atomic SQL RPCs for registrations, OTP verification, reviews, and election publication; it also has request limits, input bounds, session cookies, security headers, and stable local development secrets.
 - A Solidity ballot-box boundary that accepts encrypted ballot bytes and delegates proof checks to configured verifier contracts.
 - A threat model and an explicit list of cryptographic components that are not implemented.
 
-**Voting is intentionally disabled.** The user interface and API do not accept a candidate selection or claim a proof passed. The demo election and OTP are not real election records or identity evidence.
+**Voting is intentionally disabled.** The user interface and API do not accept a candidate selection or claim a proof passed. The development OTP is not real identity evidence.
 
-The local SQLite registry does not encrypt voter identity fields at rest. Keep the database and local secret file on a trusted development machine and use fictional voter information.
+The server-side Supabase service key is privileged and bypasses RLS. Keep it outside the browser and repository, rotate it after exposure, and use fictional voter information. The development OTP is not delivered by email.
 
 ## Work breakdown before any real deployment
 
@@ -33,7 +33,7 @@ The local SQLite registry does not encrypt voter identity fields at rest. Keep t
 4. **Metadata and coercion:** Relaying can still reveal timing and network metadata. Remote voting cannot guarantee a private environment or prevent coercion.
 5. **Trustee collusion:** Threshold decryption protects ballots only while fewer than the threshold number of trustees collude and key material remains safe.
 6. **Public verifiability:** Voters need inclusion evidence and an independently checkable tally proof, with a procedure for disputes and a fallback if the chain or relayer is unavailable.
-7. **Audit integrity:** The prototype log is locally HMAC-linked. Production needs independently witnessed, append-only records and separation between election administrators and audit operators.
+7. **Audit integrity:** The prototype database log is an append-only SHA-256 chain. Production needs independently witnessed checkpoints, append-only external records, and separation between election administrators and audit operators.
 
 ## Out of scope for this prototype
 
