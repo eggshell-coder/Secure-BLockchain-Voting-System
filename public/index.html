@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0c2438" />
+    <meta name="description" content="A transparent, privacy-first election prototype." />
+    <title>Ballot — Election Prototype</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="sidebar" aria-label="Main navigation">
+        <a class="brand" href="#home" data-view="voter" aria-label="Ballot home">
+          <span class="brand-mark" aria-hidden="true">B</span>
+          <span class="brand-copy"><strong>ballot</strong><small>TRUST, MADE VISIBLE</small></span>
+        </a>
+        <div class="sidebar-label">WORKSPACE</div>
+        <nav class="primary-nav">
+          <button class="nav-item active" data-view="voter"><span class="nav-icon">◉</span><span>Voter portal</span></button>
+          <button class="nav-item" data-view="admin"><span class="nav-icon">▦</span><span>Election admin</span></button>
+          <button class="nav-item" data-view="verify"><span class="nav-icon">⌕</span><span>Public verifier</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="prototype-note"><span class="pulse-dot"></span><div><strong>Prototype environment</strong><small>Test data only</small></div></div>
+          <div class="sidebar-footer">Privacy is part of the protocol.<br />Not a production election system.</div>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="crumb"><span>Workspace</span><b>/</b><strong id="page-crumb">Voter portal</strong></div>
+          <div class="topbar-right">
+            <span class="network-pill"><span class="network-dot"></span>Local prototype</span>
+            <button class="avatar" id="account-button" aria-label="Account menu">A</button>
+          </div>
+        </header>
+
+        <div id="app-content" class="content" aria-live="polite">
+          <div class="loading"><span class="spinner"></span><span>Loading election workspace…</span></div>
+        </div>
+        <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

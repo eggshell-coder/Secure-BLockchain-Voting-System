@@ -1,0 +1,10 @@
+.env
+node_modules/
+data/
+artifacts/
+cache/
+contracts/artifacts/
+contracts/cache/
+.DS_Store
+Thumbs.db
+.freebuff/
