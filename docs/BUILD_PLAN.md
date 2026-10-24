@@ -1,42 +1,46 @@
 # Build plan and completion gates
 
-## Prototype delivered in this repository
+## Implemented prototype scope
 
-- Voter-facing election list and registration flow. The development-only OTP is displayed on screen; production registration is unavailable until a delivery provider is configured.
-- Administrator sign-in, pending voter review, election draft creation, manifest freeze on publish, and a Postgres-backed append-only audit chain.
-- A browser check that recomputes each election manifest hash from the API response.
-- A same-origin Node API connected to Supabase Postgres, with atomic SQL RPCs for registrations, OTP verification, reviews, and election publication; it also has request limits, input bounds, session cookies, security headers, and stable local development secrets.
-- A Solidity ballot-box boundary that accepts encrypted ballot bytes and delegates proof checks to configured verifier contracts.
-- A threat model and an explicit list of cryptographic components that are not implemented.
+- Supabase Auth registration, registrar approval, administrator election management, and Postgres-backed audit events.
+- Frozen election manifests with a prototype Ristretto255 ElGamal public key.
+- Browser one-hot exponential ElGamal encryption, disjunctive Chaum-Pedersen bit proofs, and sum-equals-one proof.
+- Browser-held, passphrase-encrypted Semaphore V4 identity; approved-voter commitments staged without timestamps; CSPRNG-shuffled insertion at group freeze; frozen root and server-side eligibility proof checks.
+- Server-side ballot proof verifier and scheduled/open-window checks.
+- Append-only accepted-ballot table, unique election-scoped nullifier, and serialized per-election SHA-256 chain RPC.
+- Solidity ballot box that stores encrypted ballot bytes and accepts only an EIP-712 attestation from its configured verification authority.
+- 2-of-3 Shamir share math, aggregate-only homomorphic tally, Chaum-Pedersen decryption-share proofs, tally CLI, public election export and independent verifier.
+- Misuse tests for invalid one-hot ballots, malformed points, wrong election, late ballot, replay/nullifier, Semaphore proof binding, hash-chain tampering, and threshold tally tampering.
 
-**Voting is intentionally disabled.** The user interface and API do not accept a candidate selection or claim a proof passed. The development OTP is not real identity evidence.
+**Ballot submission remains disabled.** `ENABLE_BALLOT_ACCEPTANCE=false` and the hard-coded `cryptoReadiness.votingEnabled=false` both block the relay. A code implementation passing tests is not equivalent to production readiness.
 
-The server-side Supabase service key is privileged and bypasses RLS. Keep it outside the browser and repository, rotate it after exposure, and use fictional voter information. The development OTP is not delivered by email.
-
-## Work breakdown before any real deployment
+## Work still required before a real election
 
 | Phase | Deliverables | Completion gate |
 | --- | --- | --- |
-| 1. Requirements and governance | Election rules, eligibility source, appeal process, privacy retention, accessibility and incident procedures | Election authority approves a written protocol and role separation |
-| 2. Credential issuance | One-per-eligible-voter anonymous credential; revocation and recovery design; no identity-to-commitment map | Independent protocol review and privacy analysis |
-| 3. Ballot client | Reviewed randomized encryption, manifest-bound ballot validity proof, reproducible client build | Audited cryptographic implementation and misuse-focused review |
-| 4. Proof verifiers | Version-pinned on-chain verifier for eligibility and ballot validity | Independent vectors, verifier audit, and gas/DoS analysis |
-| 5. Election deployment | Threshold key ceremony, voter group root, frozen manifest, contract verification, relayer policy | Reproducible deployment and published configuration record |
-| 6. Tally and verification | Threshold aggregation/decryption, verifiable shares, public tally proof and independent verifier | Independent recomputation agrees with published result |
-| 7. Operational readiness | Penetration review, load and outage plans, monitoring, key custody, accessibility review, incident response | Election authority and independent assessors sign off |
+| 1. Governance and eligibility | Election rules, authoritative student roster, appeal process, privacy and retention policy, accessibility and incident procedures | Election authority approves the written protocol and role separation |
+| 2. Distributed key ceremony | Generate the ElGamal secret jointly so no administrator ever knows the full key; verified trustee custody and recovery plan | Independent ceremony record; no single-key setup used |
+| 3. Protocol and implementation review | Review client encryption, proof transcripts, Semaphore integration, serialization, nullifiers, random generation and failure behavior | Independent cryptographic audit and published test vectors |
+| 4. Database and API verification | Apply migrations to the target Supabase project; verify RLS, RPC privileges, race behavior, transaction rollback and restore procedures against PostgreSQL | Live integration tests and access-control review pass |
+| 5. Contract/deployment design | Deploy immutable election contract, secure authority keys, decide on censorship/recovery, make on-chain and database inclusion records reconcile | Reproducible deployment; audit of attestor and contract; data-availability/gas review |
+| 6. Public tally settlement | Add concrete `ITallyProofVerifier`, tie tally to the exact on-chain accepted-ballot commitment, and publish trustee proofs and result | Independent verifier agrees with chain state and published result |
+| 7. Operations | Penetration review, load and outage plans, monitoring, key custody, accessible voter journey, incident response and rehearsals | Election authority and independent assessors sign off |
 
-## Priority gaps
+## Known gaps and risks
 
-1. **Identity assurance:** OTP shows control of a contact channel; it does not prove eligibility. The roster and registrar process need a documented source of truth and an appeal path.
-2. **Credential privacy:** The issuer must not learn the anonymous membership secret or retain a mapping that links a voter to a nullifier.
-3. **Ballot secrecy and validity:** A candidate identifier must never be sent in plaintext. The client must encrypt the choice and prove it encodes exactly one option from the frozen manifest.
-4. **Metadata and coercion:** Relaying can still reveal timing and network metadata. Remote voting cannot guarantee a private environment or prevent coercion.
-5. **Trustee collusion:** Threshold decryption protects ballots only while fewer than the threshold number of trustees collude and key material remains safe.
-6. **Public verifiability:** Voters need inclusion evidence and an independently checkable tally proof, with a procedure for disputes and a fallback if the chain or relayer is unavailable.
-7. **Audit integrity:** The prototype database log is an append-only SHA-256 chain. Production needs independently witnessed checkpoints, append-only external records, and separation between election administrators and audit operators.
+1. **Eligibility assurance:** control of a university mailbox does not prove current enrollment. The registrar must check an authoritative roster and provide an appeal route.
+2. **Enrollment correlation:** issuance flags and commitments have no shared voter key or timestamps, the legacy direct mapping is removed, and group order is shuffled at freeze. The registration server still sees a voter ID and commitment together briefly while processing enrollment; this is not blind credential issuance. Old backups can retain the pre-migration mapping, timestamps and order.
+3. **Small anonymity sets:** three Semaphore members satisfy a technical minimum only. The university must enroll a large, legitimate eligible set and document the privacy implications.
+4. **Trusted attestor:** the contract relies on one verification authority. That key can censor or attest invalid ballots if the server is compromised. This design is not trustless.
+5. **Threshold setup:** current Shamir shares are split from a pre-existing single-admin secret. The original administrator knows the secret, so demo shares do not offer production threshold custody.
+6. **Separate log commitments:** the database SHA-256 chain and contract Keccak chain are different. A concrete inclusion/reconciliation proof must bind the exact tally to the exact on-chain ballots.
+7. **Tally settlement:** a public script checks the tally and share proofs, but the contract has no concrete tally verifier. The contract's tally publication method is not yet usable as a verified settlement path.
+8. **Metadata and coercion:** network/timing metadata remains visible to services and relayers. Remote voting cannot guarantee a private device or prevent coercion.
+9. **Audit integrity:** a local hash chain detects modifications to retained rows, but independent checkpoints are needed to detect tail truncation.
 
-## Out of scope for this prototype
+## Out of scope
 
-- A deployable production election, real voter records, real OTP delivery, or production key management
-- A claim that blockchain alone guarantees anonymity, eligibility, coercion resistance, availability, or correct results
+- A production election or real voter records
+- A claim that blockchain alone provides anonymity, eligibility, coercion resistance, availability, or correct results
+- Production key management, an independently generated threshold key, or administrator MFA
 - Placeholder or mock proof verifiers

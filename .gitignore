@@ -1,6 +1,7 @@
 .env
 node_modules/
 data/
+/data/election-keys/
 artifacts/
 cache/
 contracts/artifacts/
@@ -8,3 +9,7 @@ contracts/cache/
 .DS_Store
 Thumbs.db
 .freebuff/
+public/app.bundle.js
+public/ballot-crypto.bundle.js
+public/semaphore-client.bundle.js
+supabase/.temp/

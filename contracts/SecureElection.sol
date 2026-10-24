@@ -1,28 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @notice Implementations must be reviewed, version-pinned proof verifiers.
-/// The eligibility proof must bind membership, scope, nullifier, and ballot hash.
-/// The ballot proof must prove the ciphertext encodes exactly one allowed choice.
-interface IElectionProofVerifier {
-    function verifyEligibility(
-        bytes calldata proof,
-        bytes32 groupRoot,
-        bytes32 scope,
-        bytes32 nullifier,
-        bytes32 ballotHash
-    ) external view returns (bool);
-
-    function verifyEncryptedBallot(
-        bytes calldata proof,
-        bytes calldata ciphertext,
-        bytes32 manifestHash,
-        bytes32 electionPublicKeyHash
-    ) external view returns (bool);
-}
-
-/// @notice Verifies that a published aggregate tally follows from the accepted
-/// ballot commitment and the election's encrypted tally protocol.
+/// @notice Tally proof verifier remains an independently supplied, version-pinned contract.
 interface ITallyProofVerifier {
     function verifyTally(
         bytes32 acceptedBallotsHash,
@@ -32,33 +11,44 @@ interface ITallyProofVerifier {
     ) external view returns (bool);
 }
 
-/// @notice Immutable ballot box for one election.
-/// Candidate selections are never accepted as plaintext inputs and are never
-/// emitted in events. Ballot proof, encryption, trustee, and tally schemes are
-/// intentionally supplied through verifier contracts rather than mocked here.
+/// @notice Ballot box for one election. Eligibility and Ristretto ballot proofs
+/// are verified by the server before an EIP-712 attestation is signed. This
+/// contract trusts that attestor and records the encrypted ballot bytes,
+/// ballot digest, and Semaphore nullifier on chain.
+/// @dev This is an explicit trusted-relayer boundary. It is not a trustless ZK verifier.
 contract SecureElection {
     bytes32 public immutable electionId;
     bytes32 public immutable manifestHash;
-    bytes32 public immutable voterGroupRoot;
-    bytes32 public immutable electionPublicKeyHash;
+    bytes32 public immutable electionPublicKey;
+    bytes32 public immutable semaphoreGroupRoot;
+    uint256 public immutable semaphoreScope;
     uint64 public immutable votingStartsAt;
     uint64 public immutable votingEndsAt;
-    IElectionProofVerifier public immutable proofVerifier;
+    address public immutable verificationAuthority;
     ITallyProofVerifier public immutable tallyVerifier;
 
-    mapping(bytes32 nullifier => bool used) public nullifierUsed;
-
-    // A deterministic commitment to the ordered list of accepted ballots.
-    // Independent verifiers should also reconstruct the list from chain data.
     bytes32 public acceptedBallotsHash;
     bytes32 public resultHash;
     bool public tallyFinalized;
+    mapping(bytes32 nullifier => bytes32 ballotHash) public ballotHashByNullifier;
+
+    bytes32 private constant DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private constant BALLOT_TYPEHASH = keccak256(
+        "VerifiedBallot(bytes32 electionId,bytes32 manifestHash,bytes32 semaphoreGroupRoot,uint256 semaphoreScope,bytes32 nullifier,bytes32 ballotHash)"
+    );
+    bytes32 private constant NAME_HASH = keccak256("SecureElection");
+    bytes32 private constant VERSION_HASH = keccak256("2");
+    uint256 private constant SECP256K1_HALF_N =
+        0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     event EncryptedBallotAccepted(
         bytes32 indexed electionId,
         bytes32 indexed nullifier,
         bytes32 indexed ballotHash,
-        bytes ciphertext
+        bytes encryptedBallot,
+        bytes attestationSignature
     );
     event TallyPublished(bytes32 indexed electionId, bytes32 resultHash);
 
@@ -67,115 +57,119 @@ contract SecureElection {
     error VotingStillOpen();
     error NullifierAlreadyUsed();
     error InvalidNullifier();
-    error InvalidEligibilityProof();
-    error InvalidEncryptedBallot();
+    error InvalidBallotDigest();
+    error InvalidAttestation();
     error TallyAlreadyFinalized();
     error InvalidTallyProof();
 
     constructor(
         bytes32 electionId_,
         bytes32 manifestHash_,
-        bytes32 voterGroupRoot_,
-        bytes32 electionPublicKeyHash_,
+        bytes32 electionPublicKey_,
+        bytes32 semaphoreGroupRoot_,
+        uint256 semaphoreScope_,
         uint64 votingStartsAt_,
         uint64 votingEndsAt_,
-        address proofVerifier_,
+        address verificationAuthority_,
         address tallyVerifier_
     ) {
         if (
             electionId_ == bytes32(0) ||
             manifestHash_ == bytes32(0) ||
-            voterGroupRoot_ == bytes32(0) ||
-            electionPublicKeyHash_ == bytes32(0) ||
+            electionPublicKey_ == bytes32(0) ||
+            semaphoreGroupRoot_ == bytes32(0) ||
+            semaphoreScope_ == 0 ||
             votingStartsAt_ >= votingEndsAt_ ||
-            proofVerifier_.code.length == 0 ||
+            verificationAuthority_ == address(0) ||
             tallyVerifier_.code.length == 0
         ) revert InvalidConfiguration();
 
         electionId = electionId_;
         manifestHash = manifestHash_;
-        voterGroupRoot = voterGroupRoot_;
-        electionPublicKeyHash = electionPublicKeyHash_;
+        electionPublicKey = electionPublicKey_;
+        semaphoreGroupRoot = semaphoreGroupRoot_;
+        semaphoreScope = semaphoreScope_;
         votingStartsAt = votingStartsAt_;
         votingEndsAt = votingEndsAt_;
-        proofVerifier = IElectionProofVerifier(proofVerifier_);
+        verificationAuthority = verificationAuthority_;
         tallyVerifier = ITallyProofVerifier(tallyVerifier_);
     }
 
-    /// @notice Domain-separated scope prevents proof reuse across elections,
-    /// contracts, and chains.
-    function electionScope() public view returns (bytes32) {
-        return keccak256(
-            abi.encode(block.chainid, address(this), electionId, manifestHash)
-        );
+    function domainSeparator() public view returns (bytes32) {
+        return keccak256(abi.encode(
+            DOMAIN_TYPEHASH,
+            NAME_HASH,
+            VERSION_HASH,
+            block.chainid,
+            address(this)
+        ));
+    }
+
+    function electionScope() external view returns (bytes32) {
+        return bytes32(semaphoreScope);
     }
 
     function votingOpen() public view returns (bool) {
         return block.timestamp >= votingStartsAt && block.timestamp < votingEndsAt;
     }
 
-    /// @param nullifier Election-scoped public double-vote prevention value.
-    /// @param ciphertext Encrypted ballot bytes; never a plaintext candidate ID.
-    /// @param eligibilityProof Anonymous membership proof bound to ballotHash.
-    /// @param ballotProof Proof the ciphertext encodes one allowed selection.
-    function castEncryptedBallot(
+    /// @notice Relay a ballot only after the verification authority has checked
+    /// its Semaphore membership proof and Ristretto one-hot validity proofs.
+    /// @param nullifier Semaphore's election-scoped field element, padded to bytes32.
+    /// @param encryptedBallot Canonical JSON bytes whose SHA-256 digest is ballotHash.
+    /// @param attestationSignature EIP-712 signature from verificationAuthority.
+    function relayVerifiedBallot(
         bytes32 nullifier,
-        bytes calldata ciphertext,
-        bytes calldata eligibilityProof,
-        bytes calldata ballotProof
+        bytes calldata encryptedBallot,
+        bytes calldata attestationSignature
     ) external {
         if (!votingOpen() || tallyFinalized) revert VotingNotOpen();
         if (nullifier == bytes32(0)) revert InvalidNullifier();
-        if (nullifierUsed[nullifier]) revert NullifierAlreadyUsed();
-        // Effects before external verifier calls; a failed proof reverts this write.
-        nullifierUsed[nullifier] = true;
+        if (ballotHashByNullifier[nullifier] != bytes32(0)) revert NullifierAlreadyUsed();
 
-        bytes32 ballotHash = keccak256(ciphertext);
-        if (
-            !proofVerifier.verifyEligibility(
-                eligibilityProof,
-                voterGroupRoot,
-                electionScope(),
-                nullifier,
-                ballotHash
-            )
-        ) revert InvalidEligibilityProof();
+        bytes32 ballotHash = sha256(encryptedBallot);
+        if (ballotHash == bytes32(0)) revert InvalidBallotDigest();
+        bytes32 structHash = keccak256(abi.encode(
+            BALLOT_TYPEHASH,
+            electionId,
+            manifestHash,
+            semaphoreGroupRoot,
+            semaphoreScope,
+            nullifier,
+            ballotHash
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+        if (_recover(digest, attestationSignature) != verificationAuthority) revert InvalidAttestation();
 
-        if (
-            !proofVerifier.verifyEncryptedBallot(
-                ballotProof,
-                ciphertext,
-                manifestHash,
-                electionPublicKeyHash
-            )
-        ) revert InvalidEncryptedBallot();
-
-        acceptedBallotsHash = keccak256(
-            abi.encode(acceptedBallotsHash, nullifier, ballotHash)
-        );
-
-        // Publish ciphertext bytes so independent tally operators can retrieve
-        // the encrypted ballots. Benchmark event data costs before deployment.
-        emit EncryptedBallotAccepted(electionId, nullifier, ballotHash, ciphertext);
+        ballotHashByNullifier[nullifier] = ballotHash;
+        acceptedBallotsHash = keccak256(abi.encode(acceptedBallotsHash, nullifier, ballotHash));
+        emit EncryptedBallotAccepted(electionId, nullifier, ballotHash, encryptedBallot, attestationSignature);
     }
 
-    /// @notice Anyone may publish a tally after close if its public proof checks.
     function publishTally(bytes32 resultHash_, bytes calldata tallyProof) external {
         if (block.timestamp < votingEndsAt) revert VotingStillOpen();
         if (tallyFinalized) revert TallyAlreadyFinalized();
-        // A rejected proof reverts this state change atomically.
         tallyFinalized = true;
         if (
             resultHash_ == bytes32(0) ||
-            !tallyVerifier.verifyTally(
-                acceptedBallotsHash,
-                resultHash_,
-                manifestHash,
-                tallyProof
-            )
+            !tallyVerifier.verifyTally(acceptedBallotsHash, resultHash_, manifestHash, tallyProof)
         ) revert InvalidTallyProof();
 
         resultHash = resultHash_;
         emit TallyPublished(electionId, resultHash_);
+    }
+
+    function _recover(bytes32 digest, bytes calldata signature) private pure returns (address signer) {
+        if (signature.length != 65) revert InvalidAttestation();
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly ("memory-safe") {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+        if (uint256(s) > SECP256K1_HALF_N || (v != 27 && v != 28)) revert InvalidAttestation();
+        signer = ecrecover(digest, v, r, s);
     }
 }

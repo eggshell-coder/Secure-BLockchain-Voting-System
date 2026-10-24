@@ -7,10 +7,26 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "start": "node server/index.mjs",
-    "compile:contracts": "hardhat compile"
+    "build:client": "esbuild public/app.js --bundle --format=esm --outfile=public/app.bundle.js && esbuild public/ballot-crypto.js --bundle --format=esm --outfile=public/ballot-crypto.bundle.js && esbuild public/semaphore-client.js --bundle --format=esm --outfile=public/semaphore-client.bundle.js",
+    "prestart": "npm run build:client",
+    "start": "node --experimental-strip-types server/index.mjs",
+    "compile:contracts": "hardhat compile",
+    "test:crypto": "node --experimental-strip-types --test tests/crypto/ballot.test.mjs",
+    "election:keygen": "node --experimental-strip-types scripts/generate-election-key.mjs",
+    "election:reopen-keygen": "node scripts/reopen-and-generate-election-key.mjs",
+    "election:split-key": "node --experimental-strip-types scripts/split-election-key.mjs",
+    "election:export": "node scripts/export-election.mjs",
+    "election:tally": "node --experimental-strip-types scripts/tally-election.mjs",
+    "election:verify": "node --experimental-strip-types scripts/verify.mjs"
   },
   "devDependencies": {
     "hardhat": "^3.0.0"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@semaphore-protocol/core": "4.14.5",
+    "@supabase/supabase-js": "2.118.0",
+    "esbuild": "0.28.2",
+    "ethers": "6.13.5"
   }
 }
