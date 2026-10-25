@@ -1,0 +1,128 @@
+name: Android demo APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: Public HTTPS origin serving both the voting UI and its Node API (for example, https://vote.example.edu)
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    name: Build and test before publishing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build browser bundles
+        run: npm run build:client
+      - name: Run ballot crypto tests
+        run: npm run test:crypto
+      - name: Compile Solidity contracts
+        run: npm run compile:contracts
+
+  build-apk:
+    name: Build Android demo APK
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    env:
+      API_BASE_URL: ${{ github.event.inputs.api_base_url || vars.API_BASE_URL }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13
+          cache: npm
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android 16 SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Validate deployed app URL
+        run: |
+          node --input-type=module -e 'const value = process.env.API_BASE_URL?.trim(); if (!value) throw new Error("Set the API_BASE_URL repository variable or provide api_base_url."); const url = new URL(value); if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("API_BASE_URL must be an HTTPS origin with no credentials, path, query, or fragment."); console.log(`Building the mobile shell for ${url.origin}`);'
+          curl --fail --silent --show-error --retry 3 --retry-delay 2 "$API_BASE_URL/" -o /dev/null
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build web bundles
+        run: npm run build:client
+      - name: Sync Android project to deployed app
+        run: npx cap sync android
+      - name: Build installable debug APK
+        env:
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+          ANDROID_VERSION_NAME: ${{ github.ref_name }}
+        working-directory: android
+        run: bash ./gradlew --no-daemon assembleDebug
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ballot-android-demo-${{ github.ref_name }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Attach APK to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ballot-android-demo-${{ github.ref_name }}
+          path: release-assets
+      - name: Publish APK on GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/app-debug.apk \
+            --title "Ballot demo $GITHUB_REF_NAME" \
+            --notes "Installable Android demo APK. This build loads the configured HTTPS app server and is intended for prototype evaluation, not real elections or Play Store distribution."
+
+  publish-container:
+    name: Publish server container to GitHub Packages
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Build and publish versioned container
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IMAGE="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker build --tag "$IMAGE:$GITHUB_REF_NAME" --tag "$IMAGE:latest" .
+          docker push "$IMAGE:$GITHUB_REF_NAME"
+          docker push "$IMAGE:latest"

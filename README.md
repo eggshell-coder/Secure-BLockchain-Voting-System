@@ -25,6 +25,34 @@ The API stores voter identity data in Supabase Postgres off-chain and never stor
 
 The first startup creates a stable local-only JWT secret if none is configured. Voter registrations, Supabase Auth identity links, elections, candidates, and the audit chain are stored in Supabase Postgres. No fictional election is automatically inserted.
 
+## Use the web app on a phone
+
+For a temporary same-Wi-Fi demo, start the server so other devices on your private network can reach it:
+
+```powershell
+$env:HOST = "0.0.0.0"
+npm start
+```
+
+Find the computer's IPv4 address with `ipconfig`, then open `http://<computer-ip>:4173` on the phone connected to the same Wi-Fi. Windows Firewall may ask to allow Node.js on a private network. If email confirmation is enabled, add that exact development address (with `/email-confirmed.html`) to Supabase Auth's redirect URL allowlist. Use a public HTTPS deployment for real remote access.
+
+## Android APK from GitHub Releases
+
+The Android app is a Capacitor shell that loads the hosted web app. It needs an internet connection and a public HTTPS server running this Node app; it is not a self-contained/offline copy. GitHub Pages cannot host the API. Deploy the Docker image or the Node server to a host that supports environment variables and TLS, then:
+
+1. Set the production Supabase and administrator environment variables on that host. Configure Supabase Auth's Site URL and redirect allowlist for the deployed HTTPS origin.
+2. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and add `API_BASE_URL` with the app origin only, for example `https://vote.example.edu`. The Node server currently serves both the UI and API on the same origin; this setting is deliberately configurable and is not hard-coded in the Android project.
+3. Push a version tag to run build, crypto tests, contract compilation, Android packaging, and release publishing:
+
+   ```powershell
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+4. Download `app-debug.apk` from the resulting GitHub Release. This is a debug-signed prototype build for sideloaded evaluation, not a Play Store release or a real election system.
+
+The same release publishes a versioned server image to GitHub Container Registry (`ghcr.io/eggshell-coder/secure-blockchain-voting-system`). The image listens on port `4173`; set `HOST=0.0.0.0` and the required application environment variables in the hosting service. The `Build and test` workflow runs on pushes to `main` and pull requests. The `Android demo APK` workflow can also be run manually to download an APK as a 30-day Actions artifact by supplying `api_base_url`; tagged runs use the `API_BASE_URL` repository variable and attach the APK to a GitHub Release. Change that value when building a later APK for a new app/API origin. A standalone cross-origin API host is not supported by this same-origin cookie-auth setup.
+
 ## Prototype election key setup
 
 Create a draft election and candidates in the admin panel. While the app is running, copy the draft election UUID and run:

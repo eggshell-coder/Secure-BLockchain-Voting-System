@@ -913,9 +913,11 @@ const server = createServer((req, res) => {
 });
 
 const port = Number(process.env.PORT ?? 4173);
+const host = process.env.HOST ?? "127.0.0.1";
 await verifySupabaseConnection();
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Voting prototype available at http://localhost:${port}`);
+server.listen(port, host, () => {
+  const displayHost = host === "0.0.0.0" || host === "::" ? "0.0.0.0" : host;
+  console.log(`Voting prototype listening at http://${displayHost}:${port}`);
   console.log("Database: Supabase Postgres");
   console.log("Ballot submission remains disabled pending independent review and deployment checks.");
 });

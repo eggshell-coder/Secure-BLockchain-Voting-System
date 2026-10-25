@@ -1,0 +1,33 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build, crypto tests, and contract compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build browser bundles
+        run: npm run build:client
+      - name: Run ballot crypto tests
+        run: npm run test:crypto
+      - name: Compile Solidity contracts
+        run: npm run compile:contracts
+      - name: Build deployment container
+        run: docker build --tag ballot-prototype:${{ github.sha }} .

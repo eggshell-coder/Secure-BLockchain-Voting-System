@@ -20,7 +20,11 @@
     "election:verify": "node --experimental-strip-types scripts/verify.mjs"
   },
   "devDependencies": {
-    "hardhat": "^3.0.0"
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "hardhat": "^3.0.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@noble/curves": "2.4.0",

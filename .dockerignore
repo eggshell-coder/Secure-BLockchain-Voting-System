@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+data
+android
+artifacts
+cache
+contracts/artifacts
+contracts/cache
+public/app.bundle.js
+public/ballot-crypto.bundle.js
+public/semaphore-client.bundle.js
