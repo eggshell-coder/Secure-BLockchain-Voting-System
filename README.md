@@ -38,7 +38,7 @@ Find the computer's IPv4 address with `ipconfig`, then open `http://<computer-ip
 
 ## Android APK from GitHub Releases
 
-The Android app is a Capacitor shell that loads the hosted web app. It needs an internet connection and a public HTTPS server running this Node app; it is not a self-contained/offline copy. GitHub Pages cannot host the API. Deploy the Docker image or the Node server to a host that supports environment variables and TLS, then:
+The Android app is a Capacitor shell that loads the hosted web app. It needs an internet connection and a public HTTPS server running this Node app; it is not a self-contained/offline copy. GitHub Pages cannot host the API. [Capacitor documents external `server.url` loading as a live-reload option, not production deployment](https://capacitorjs.com/docs/config), so this APK is strictly a prototype demonstration shell. Do not use it for a real election. Deploy the Docker image or the Node server to a host that supports environment variables and TLS, then:
 
 1. Set the production Supabase and administrator environment variables on that host. Configure Supabase Auth's Site URL and redirect allowlist for the deployed HTTPS origin.
 2. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and add `API_BASE_URL` with the app origin only, for example `https://vote.example.edu`. The Node server currently serves both the UI and API on the same origin; this setting is deliberately configurable and is not hard-coded in the Android project.
