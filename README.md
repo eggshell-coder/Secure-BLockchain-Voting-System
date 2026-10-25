@@ -6,7 +6,7 @@ An educational prototype for a single-organization election. It provides a unive
 
 **This project is not ready for a real election.** The repository now contains prototype browser encryption, ballot and Semaphore proof verification, hash-chained ballot storage, an attested Solidity relay, 2-of-3 tally helpers, a public export and verifier. These components are not independently audited or deployed end to end. Ballot submission remains disabled in both the API and UI; the code does not simulate successful ballot acceptance.
 
-The API stores voter identity data in Supabase Postgres off-chain and never stores vote choices. Voters sign in through Supabase Auth with Google or a real email code; the browser uses only the publishable key. The server-only secret key must never be placed in browser code or committed. A university email domain proves control of that mailbox, not current enrollment; a registrar must verify the submitted student ID against the university roster. Use fictional data while evaluating this prototype. The ballot contract records an election-scoped nullifier and a commitment to ciphertext. Do not put a plaintext candidate ID in a message, event, API log, database row, or transaction.
+The API stores voter identity data in Supabase Postgres off-chain and never stores vote choices. Voters register with a name, university email, and password, confirm the email through Supabase Auth, then sign in with email and password. The browser uses only the publishable key, while the server requires a confirmed email and an approved university email domain. The server-only secret key must never be placed in browser code or committed. A university email domain proves control of that account, not current enrollment; a registrar must verify the submitted student ID against the university roster. Use fictional data while evaluating this prototype. The ballot contract records an election-scoped nullifier and a commitment to ciphertext. Do not put a plaintext candidate ID in a message, event, API log, database row, or transaction.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ The API stores voter identity data in Supabase Postgres off-chain and never stor
 2. Copy `.env.example` to `.env`, then set `SUPABASE_URL`, the browser-safe `SUPABASE_PUBLISHABLE_KEY`, `VOTER_EMAIL_DOMAINS`, and a server-only `SUPABASE_SECRET_KEY` (or the legacy `SUPABASE_SERVICE_ROLE_KEY`). Keep the server key out of frontend code and Git.
 3. Set `ADMIN_EMAIL` and a strong `ADMIN_PASSWORD`.
 4. Install packages with `npm install`.
-5. In Supabase Auth, enable Google and configure a Google OAuth web client. Add the local and production app URLs to Supabase's redirect URL allowlist. Configure custom SMTP with a verified sender; set the email OTP template to include `{{ .Token }}` so users receive a code from your email provider.
+5. In Supabase Auth, enable the Email provider and turn on **Confirm email**. For local development set Site URL to `http://localhost:4173` and add `http://localhost:4173/**` plus your production app URL to the redirect URL allowlist. Use the Supabase signup confirmation link template (`{{ .ConfirmationURL }}`). Configure custom SMTP with a verified sender if confirmation emails must reach users outside your Supabase organization team.
 6. Start the app with `npm start`. It bundles the browser Auth client and checks the server-to-Supabase connection.
 7. Open `http://localhost:4173`.
 
@@ -79,10 +79,10 @@ See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for the implemented scope and remai
 
 ## Important limitations
 
-- Google or email verification proves control of a university account or mailbox, not active enrollment. Eligibility depends on the organization’s roster and registrar process.
+- Email confirmation and an allowed email domain prove control of a university mailbox, not active enrollment. Eligibility depends on the organization’s roster and registrar process.
 - A relayer does not automatically hide IP address, timing, or service-side metadata.
 - Remote voting cannot guarantee a private voting environment or coercion resistance.
 - Testnet deployment does not establish production security or availability.
 - The database audit chain is append-only for the application role and detects changes to retained events; independent checkpoints are still needed to detect tail truncation.
 - The prototype has one environment-configured administrator account and no administrator MFA.
-- The server-side Supabase key is privileged. Rotate it if it has been shared or exposed. Real email delivery and Google sign-in work only after provider and SMTP setup in Supabase.
+- The server-side Supabase key is privileged. Rotate it if it has been shared or exposed. Email sign-in requires the Supabase Email provider, Confirm email, and an allowed confirmation redirect URL.

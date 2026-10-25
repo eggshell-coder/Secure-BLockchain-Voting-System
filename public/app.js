@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 const content = document.querySelector("#app-content");
 const crumb = document.querySelector("#page-crumb");
 const toast = document.querySelector("#toast");
+const emailVerifiedRedirect = new URLSearchParams(window.location.search).get("email_verified") === "1";
 
 const state = {
   view: "voter",
@@ -13,7 +14,8 @@ const state = {
   authSession: null,
   authReady: false,
   authError: "",
-  pendingEmail: "",
+  authMode: "login",
+  authNotice: emailVerifiedRedirect ? "Your email is verified. Sign in below." : "",
   voterRecord: null,
   admin: null,
   adminElections: [],
@@ -21,6 +23,8 @@ const state = {
   audit: null,
   toastTimer: null
 };
+
+if (emailVerifiedRedirect) window.history.replaceState({}, document.title, window.location.pathname);
 
 const labels = { voter: "Voter portal", admin: "Election admin", verify: "Public verifier" };
 
@@ -180,16 +184,19 @@ function renderElection(election) {
 function renderVoterAuth() {
   if (!state.authReady) return `<div class="card card-pad"><p class="card-subtitle">Loading university sign-in…</p></div>`;
   if (!state.authConfig?.configured) {
-    return `<div class="card card-pad"><h3>University sign-in is not configured</h3><p class="card-subtitle">Set the Supabase publishable key and approved student email domains in the server environment. Then enable Google Auth and custom SMTP in Supabase.</p></div>`;
+    return `<div class="card card-pad"><h3>University sign-in is not configured</h3><p class="card-subtitle">Set the Supabase publishable key and approved student email domains in the server environment. Then enable Email Auth and email confirmations in Supabase.</p></div>`;
   }
   if (!state.authSession) {
+    const authNotice = state.authNotice ? `<p class="inline-message" role="status">${escapeHtml(state.authNotice)}</p>` : "";
+    const authError = state.authError ? `<p class="inline-message error" role="alert">${escapeHtml(state.authError)}</p>` : "";
+    if (state.authMode === "signup") {
+      return `<div class="card card-pad"><span class="eyebrow">University email registration</span><h3 class="heading-top-gap">Create your voter account</h3><p class="card-subtitle">Use your university email address. Supabase will email a confirmation link; after confirmation, return here and sign in.</p>${authNotice}${authError}<form id="signup-form" class="form-top-gap"><div class="form-grid"><div class="form-field full"><label for="signup-name">Full name</label><input class="input" id="signup-name" name="fullName" autocomplete="name" required minlength="2" maxlength="120" /></div><div class="form-field full"><label for="signup-email">University email</label><input class="input" id="signup-email" name="email" type="email" autocomplete="email" required maxlength="254" /></div><div class="form-field"><label for="signup-password">Password</label><input class="input" id="signup-password" name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128" /></div><div class="form-field"><label for="signup-password-confirm">Confirm password</label><input class="input" id="signup-password-confirm" name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" /></div></div><div class="form-actions"><button class="button button-primary" type="submit">Sign up</button><button class="button button-secondary" type="button" data-action="show-login">Back to login</button></div><div id="signup-message" aria-live="polite"></div></form></div>`;
+    }
     return `<div class="card card-pad">
-      <span class="eyebrow">Verified university account required</span><h3 class="heading-top-gap">Sign in to register</h3>
-      <p class="card-subtitle">Use your university Google account or request a real email code. Your email is verified by Supabase Auth; the registrar still checks your student ID.</p>
-      ${state.authError ? `<p class="inline-message error" role="alert">${escapeHtml(state.authError)}</p>` : ""}
-      <div class="form-actions"><button class="button button-primary" type="button" data-action="google-sign-in">Continue with Google</button></div>
-      <form id="email-otp-send-form" class="form-top-gap"><div class="form-field"><label for="auth-email">University email</label><input class="input" id="auth-email" name="email" type="email" autocomplete="email" required maxlength="254" /></div><div class="form-actions"><button class="button button-secondary" type="submit">Send sign-in code</button></div><div class="form-note">The code is sent by Supabase Auth using the configured email provider.</div><div id="auth-email-message" aria-live="polite"></div></form>
-      <form id="email-otp-verify-form" class="hidden form-divider-top"><div class="form-grid"><div class="form-field"><label for="auth-verify-email">University email</label><input class="input" id="auth-verify-email" name="email" type="email" autocomplete="email" required maxlength="254" /></div><div class="form-field"><label for="auth-email-code">Email code</label><input class="input" id="auth-email-code" name="token" inputmode="numeric" pattern="[0-9]{6}" required maxlength="6" autocomplete="one-time-code" /></div></div><div class="form-actions"><button class="button button-secondary" type="submit">Verify code</button></div><div id="auth-verify-message" aria-live="polite"></div></form>
+      <span class="eyebrow">Verified university email required</span><h3 class="heading-top-gap">Voter login</h3>
+      <p class="card-subtitle">Sign in with the email and password you registered. New accounts must confirm their email first.</p>
+      ${authNotice}${authError}
+      <form id="email-login-form" class="form-top-gap"><div class="form-grid"><div class="form-field full"><label for="login-email">University email</label><input class="input" id="login-email" name="email" type="email" autocomplete="email" required maxlength="254" /></div><div class="form-field full"><label for="login-password">Password</label><input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128" /></div></div><div class="form-actions"><button class="button button-primary" type="submit">Sign in</button><button class="button button-secondary" type="button" data-action="show-signup">Create account</button></div><div id="login-message" aria-live="polite"></div></form>
     </div>`;
   }
 
@@ -208,7 +215,8 @@ function renderVoterAuth() {
     return `<div class="card card-pad"><div class="card-head"><div><span class="eyebrow">University account</span><h3 class="heading-top-gap">Registration ${escapeHtml(status)}</h3></div><button class="button button-small button-secondary" type="button" data-action="voter-sign-out">Sign out</button></div><p class="card-subtitle">${escapeHtml(detail)}</p><div class="form-note">${escapeHtml(state.voterRecord.fullName)} · ${escapeHtml(state.voterRecord.organizationId)} · ${escapeHtml(email)}</div></div>`;
   }
 
-  return `<div class="card card-pad"><div class="card-head"><div><span class="eyebrow">Verified university account</span><h3 class="heading-top-gap">Complete voter registration</h3></div><button class="button button-small button-secondary" type="button" data-action="voter-sign-out">Sign out</button></div><p class="card-subtitle">Signed in as ${escapeHtml(email)}. Enter your name and student ID; an election administrator will check your eligibility.</p>${state.authError ? `<p class="inline-message error" role="alert">${escapeHtml(state.authError)}</p>` : ""}<form id="register-form" class="form-top-gap"><div class="form-grid"><div class="form-field"><label for="full-name">Full name</label><input class="input" id="full-name" name="fullName" autocomplete="name" required minlength="2" maxlength="120" /></div><div class="form-field"><label for="organization-id">University student ID</label><input class="input" id="organization-id" name="organizationId" autocomplete="off" required minlength="3" maxlength="80" /></div></div><div class="form-actions"><button class="button button-primary" type="submit">Submit for registrar review</button></div><div id="registration-message" aria-live="polite"></div></form></div>`;
+  const fullName = state.authSession.user?.user_metadata?.full_name ?? "";
+  return `<div class="card card-pad"><div class="card-head"><div><span class="eyebrow">Verified university email</span><h3 class="heading-top-gap">Complete voter registration</h3></div><button class="button button-small button-secondary" type="button" data-action="voter-sign-out">Sign out</button></div><p class="card-subtitle">Signed in as ${escapeHtml(email)}. Enter your student ID; an election administrator will check your eligibility.</p>${state.authError ? `<p class="inline-message error" role="alert">${escapeHtml(state.authError)}</p>` : ""}<form id="register-form" class="form-top-gap"><div class="form-grid"><div class="form-field"><label for="full-name">Full name</label><input class="input" id="full-name" name="fullName" value="${escapeHtml(fullName)}" autocomplete="name" required minlength="2" maxlength="120" /></div><div class="form-field"><label for="organization-id">University student ID</label><input class="input" id="organization-id" name="organizationId" autocomplete="off" required minlength="3" maxlength="80" /></div></div><div class="form-actions"><button class="button button-primary" type="submit">Submit for registrar review</button></div><div id="registration-message" aria-live="polite"></div></form></div>`;
 }
 
 function renderVoter() {
@@ -218,7 +226,7 @@ function renderVoter() {
   content.innerHTML = `<div class="hero-row"><div><span class="eyebrow">Your election workspace</span><h1>Make your voice count.</h1><p class="lead">Sign in with your verified student account, complete registrar review, and enroll your anonymous eligibility identity before the election begins. Prototype ballot casting remains locked until independent review and deployment checks are complete.</p></div><div class="hero-actions"><button class="button button-secondary" data-scroll="registration">Voter registration</button></div></div>
     ${banner()}
     <div class="grid-main"><section><div class="section-heading section-heading-first"><h2>Available elections</h2><p>${state.elections.length} listed</p></div><div class="right-stack">${cards}</div></section>
-    <aside class="right-stack"><div class="card card-pad"><span class="eyebrow">How eligibility works</span><h2 class="top-gap">Same university, verified individually.</h2><p class="card-subtitle">Google or email sign-in verifies control of a university account. It does not prove current enrollment; an election registrar checks the student ID and approves the registration.</p><div class="steps"><div class="step"><span class="step-number">1</span><div><strong>Sign in with university email</strong><p>Supabase Auth verifies Google sign-in or an email code.</p></div></div><div class="step"><span class="step-number">2</span><div><strong>Submit student ID</strong><p>The registrar checks it against the organization’s student roster.</p></div></div><div class="step"><span class="step-number">3</span><div><strong>Enroll an anonymous identity</strong><p>The browser keeps the identity secret encrypted. The issuer can still correlate the enrollment request and commitment.</p></div></div></div></div>
+    <aside class="right-stack"><div class="card card-pad"><span class="eyebrow">How voter access works</span><h2 class="top-gap">Verify email, then register.</h2><p class="card-subtitle">Supabase confirms the university email. A registrar checks the student ID before approving voter eligibility.</p><div class="steps"><div class="step"><span class="step-number">1</span><div><strong>Create account</strong><p>Submit your name, university email, and password.</p></div></div><div class="step"><span class="step-number">2</span><div><strong>Confirm email and sign in</strong><p>Use the link from Supabase Auth, then log in here.</p></div></div><div class="step"><span class="step-number">3</span><div><strong>Submit student ID</strong><p>The registrar checks it against the organization’s student roster.</p></div></div><div class="step"><span class="step-number">4</span><div><strong>Vote when eligible</strong><p>Voting is available only after approval and when the election is open.</p></div></div></div></div>
     <div class="plain-card"><span class="mini-label">Privacy boundary</span><p>Supabase stores verified identity and eligibility off-chain. The current UI does not collect candidate choices; encrypted ballot submission remains disabled until the prototype passes independent review and deployment checks.</p></div></aside></div>
     <section id="registration"><div class="section-heading"><h2>Voter registration</h2><p>University account required · registrar approval</p></div>${renderVoterAuth()}</section>`;
 }
@@ -230,7 +238,7 @@ function renderAdminLogin(error = "") {
 
 function renderVoterRows() {
   if (!state.voters.length) return `<div class="empty-state"><strong>No registrations yet</strong>New requests will appear here.</div>`;
-  const rows = state.voters.map((voter) => `<tr><td><span class="table-primary">${escapeHtml(voter.fullName)}</span><br><span>${escapeHtml(voter.organizationId)}</span></td><td>${escapeHtml(voter.email)}</td><td><span class="tiny-state ${voter.status === "approved" ? "approved" : ""}">${escapeHtml(voter.status)}</span></td><td>${voter.emailVerified ? "Verified" : "Pending"}</td><td>${voter.status === "pending" ? `<button class="button button-small button-secondary" data-action="approve-voter" data-id="${escapeHtml(voter.id)}" ${voter.emailVerified ? "" : "disabled"}>Approve</button> <button class="button button-small button-danger" data-action="reject-voter" data-id="${escapeHtml(voter.id)}">Reject</button>` : "—"}</td></tr>`).join("");
+  const rows = state.voters.map((voter) => `<tr><td><span class="table-primary">${escapeHtml(voter.fullName)}</span><br><span>${escapeHtml(voter.organizationId)}</span></td><td>${escapeHtml(voter.email)}</td><td><span class="tiny-state ${voter.status === "approved" ? "approved" : ""}">${escapeHtml(voter.status)}</span></td><td>${voter.emailVerified ? "Confirmed" : "Unverified"}</td><td>${voter.status === "pending" ? `<button class="button button-small button-secondary" data-action="approve-voter" data-id="${escapeHtml(voter.id)}" ${voter.emailVerified ? "" : "disabled"}>Approve</button> <button class="button button-small button-danger" data-action="reject-voter" data-id="${escapeHtml(voter.id)}">Reject</button>` : "—"}</td></tr>`).join("");
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Voter</th><th>Contact</th><th>Status</th><th>Email</th><th>Decision</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -251,7 +259,7 @@ function renderAdmin() {
   }).join("");
   const auditStatus = state.audit ? (state.audit.valid ? "Chain integrity valid" : "Chain integrity failed") : "Not loaded";
   content.innerHTML = `<div class="hero-row"><div><span class="eyebrow">Administrator console</span><h1>Election operations.</h1><p class="lead">Signed in as ${escapeHtml(state.admin.email)}. Review registrations and freeze election manifests before publication.</p></div><div class="hero-actions"><button class="button button-quiet" data-action="admin-logout">Sign out</button></div></div>${banner("Election administration is available; ballot submission remains disabled")}
-    <div class="stat-row"><div class="card stat-card"><span class="stat-label">Registrations</span><div class="stat-value">${Number(counts.registered ?? 0)}</div><div class="stat-foot">Identity records off-chain</div></div><div class="card stat-card"><span class="stat-label">Approved</span><div class="stat-value">${Number(counts.approved ?? 0)}</div><div class="stat-foot">Eligibility review complete</div></div><div class="card stat-card"><span class="stat-label">Email verified</span><div class="stat-value">${Number(counts.emailVerified ?? 0)}</div><div class="stat-foot">Channel ownership only</div></div></div>
+    <div class="stat-row"><div class="card stat-card"><span class="stat-label">Registrations</span><div class="stat-value">${Number(counts.registered ?? 0)}</div><div class="stat-foot">Identity records off-chain</div></div><div class="card stat-card"><span class="stat-label">Approved</span><div class="stat-value">${Number(counts.approved ?? 0)}</div><div class="stat-foot">Eligibility review complete</div></div><div class="card stat-card"><span class="stat-label">Email confirmed</span><div class="stat-value">${Number(counts.emailVerified ?? 0)}</div><div class="stat-foot">Supabase confirmation completed</div></div></div>
     <div class="admin-layout"><section><div class="card card-pad"><div class="card-head"><div><span class="eyebrow">Registrar queue</span><h2 class="heading-top-gap">Voter registrations</h2><p class="card-subtitle">Approval records organization eligibility. Approved voters enroll an election-specific anonymous identity separately.</p></div><button class="button button-small button-secondary" data-action="refresh-admin">Refresh</button></div><div class="table-top-gap">${renderVoterRows()}</div></div>
     <div class="card card-pad card-top-gap"><div class="card-head"><div><span class="eyebrow">Election registry</span><h2 class="heading-top-gap">Election manifests</h2><p class="card-subtitle">Generate the prototype single-admin key before publishing. Enroll approved voters, then freeze the group before voting starts. The private election key stays in <code>data/election-keys/</code>; protect and back it up securely.</p></div></div><div class="table-wrap table-top-gap"><table class="data-table"><thead><tr><th>Election</th><th>Status</th><th>Key status</th><th>Semaphore group</th><th>Manifest hash</th><th>Action</th></tr></thead><tbody>${elections || `<tr><td colspan="6" class="empty-state">No elections are available.</td></tr>`}</tbody></table></div></div></section>
     <aside class="right-stack"><div class="card card-pad"><span class="eyebrow">Create election</span><h2 class="heading-top-gap">Draft a ballot manifest</h2><p class="card-subtitle">Use one candidate per line: <code>Name | manifesto</code>. At least two candidates are required.</p><form id="election-form" class="form-top-gap"><div class="form-grid"><div class="form-field full"><label for="election-title">Election title</label><input class="input" id="election-title" name="title" required minlength="4" maxlength="160" /></div><div class="form-field full"><label for="election-description">Description</label><textarea class="textarea" id="election-description" name="description" maxlength="1000"></textarea></div><div class="form-field"><label for="starts-at">Opens</label><input class="input" id="starts-at" name="startsAt" type="datetime-local" required /></div><div class="form-field"><label for="ends-at">Closes</label><input class="input" id="ends-at" name="endsAt" type="datetime-local" required /></div><div class="form-field full"><label for="candidate-lines">Candidates</label><textarea class="textarea" id="candidate-lines" name="candidates" placeholder="Candidate A | Short platform statement&#10;Candidate B | Short platform statement" required></textarea></div></div><div class="form-actions"><button class="button button-primary" type="submit">Save draft</button></div><div id="election-message" aria-live="polite"></div></form></div>
@@ -399,13 +407,11 @@ document.addEventListener("click", async (event) => {
       notify("Your encrypted anonymous identity was registered. Keep the recovery passphrase safe.");
       return;
     }
-    if (action.dataset.action === "google-sign-in") {
-      if (!state.authClient) throw new Error("University sign-in is not configured.");
-      const { error } = await state.authClient.auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: window.location.origin }
-      });
-      if (error) throw error;
+    if (action.dataset.action === "show-signup" || action.dataset.action === "show-login") {
+      state.authMode = action.dataset.action === "show-signup" ? "signup" : "login";
+      state.authError = "";
+      state.authNotice = "";
+      renderVoter();
       return;
     }
     if (action.dataset.action === "voter-sign-out") {
@@ -414,6 +420,8 @@ document.addEventListener("click", async (event) => {
       if (error) throw error;
       state.authSession = null;
       state.voterRecord = null;
+      state.authMode = "login";
+      state.authNotice = "";
       await render();
       notify("You have signed out.");
       return;
@@ -474,48 +482,61 @@ document.addEventListener("submit", async (event) => {
       renderVoter();
     });
   }
-  if (form.id === "email-otp-send-form") {
-    const message = form.querySelector("[aria-live]");
+  if (form.id === "signup-form") {
+    const message = form.querySelector("#signup-message");
     const button = form.querySelector("button[type=submit]");
-    const email = String(new FormData(form).get("email") ?? "").trim().toLowerCase();
+    const values = Object.fromEntries(new FormData(form).entries());
+    const fullName = String(values.fullName ?? "").trim();
+    const email = String(values.email ?? "").trim().toLowerCase();
+    const password = String(values.password ?? "");
+    const confirmPassword = String(values.confirmPassword ?? "");
     button.disabled = true;
     try {
-      if (!state.authClient) throw new Error("University sign-in is not configured.");
-      if (!isAllowedStudentEmail(email)) throw new Error("Enter an approved student email address.");
-      const { error } = await state.authClient.auth.signInWithOtp({
+      if (!state.authClient) throw new Error("Email sign-up is not configured.");
+      if (!isAllowedStudentEmail(email)) throw new Error("Use an approved university email address.");
+      if (fullName.length < 2 || fullName.length > 120) throw new Error("Enter your full name.");
+      if (password !== confirmPassword) throw new Error("The passwords do not match.");
+      const { data, error } = await state.authClient.auth.signUp({
         email,
-        options: { shouldCreateUser: true, emailRedirectTo: window.location.origin }
+        password,
+        options: {
+          data: { full_name: fullName },
+          emailRedirectTo: `${window.location.origin}/email-confirmed.html`
+        }
       });
       if (error) throw error;
-      state.pendingEmail = email;
-      const verifyForm = document.querySelector("#email-otp-verify-form");
-      verifyForm.classList.remove("hidden");
-      verifyForm.elements.email.value = email;
-      message.innerHTML = `<p class="inline-message">A sign-in code was sent to ${escapeHtml(email)}. Check your inbox.</p>`;
-      verifyForm.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (data.session) {
+        await state.authClient.auth.signOut();
+        throw new Error("Email confirmation is disabled. Enable Confirm email in Supabase Auth before using this sign-up flow.");
+      }
+      state.authMode = "login";
+      state.authError = "";
+      state.authNotice = `A confirmation link was sent to ${email}. Verify your email, then sign in here.`;
+      renderVoter();
     } catch (error) {
       message.innerHTML = `<p class="inline-message error" role="alert">${escapeHtml(error.message)}</p>`;
     } finally {
       if (button?.isConnected) button.disabled = false;
     }
   }
-  if (form.id === "email-otp-verify-form") {
-    const message = form.querySelector("[aria-live]");
+  if (form.id === "email-login-form") {
+    const message = form.querySelector("#login-message");
     const button = form.querySelector("button[type=submit]");
     const values = Object.fromEntries(new FormData(form).entries());
     const email = String(values.email ?? "").trim().toLowerCase();
-    const token = String(values.token ?? "").trim();
+    const password = String(values.password ?? "");
     button.disabled = true;
     try {
-      if (!state.authClient) throw new Error("University sign-in is not configured.");
-      if (email !== state.pendingEmail || !/^\d{6}$/.test(token)) throw new Error("Enter the six-digit code sent to the same email address.");
-      const { data, error } = await state.authClient.auth.verifyOtp({ email, token, type: "email" });
+      if (!state.authClient) throw new Error("Email sign-in is not configured.");
+      if (!isAllowedStudentEmail(email)) throw new Error("Use an approved university email address.");
+      const { data, error } = await state.authClient.auth.signInWithPassword({ email, password });
       if (error) throw error;
       state.authSession = data.session;
       state.authError = "";
+      state.authNotice = "";
       await loadVoterRecord();
       renderVoter();
-      notify("University email verified.");
+      notify("Signed in.");
     } catch (error) {
       message.innerHTML = `<p class="inline-message error" role="alert">${escapeHtml(error.message)}</p>`;
     } finally {

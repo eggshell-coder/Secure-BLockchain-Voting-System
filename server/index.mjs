@@ -316,8 +316,8 @@ async function requireVerifiedVoterAuth(req) {
 
   const user = await response.json().catch(() => null);
   const email = String(user?.email ?? "").trim().toLowerCase();
-  if (!user?.id || !/^[0-9a-f-]{36}$/i.test(user.id) || !email || !(user.email_confirmed_at || user.confirmed_at)) {
-    const error = new Error("Use a verified university email account to register.");
+  if (!user?.id || !/^[0-9a-f-]{36}$/i.test(user.id) || !email || !user.email_confirmed_at) {
+    const error = new Error("Sign in with your confirmed university email account to register.");
     error.status = 403;
     throw error;
   }
@@ -710,7 +710,7 @@ async function handle(req, res) {
       p_admin_email: admin.email
     });
     if (!result?.found) return json(res, 404, { error: "Voter not found." });
-    if (result.verified === false) return json(res, 409, { error: "Verify the voter’s email or phone before approving eligibility." });
+    if (result.verified === false) return json(res, 409, { error: "The voter must have a confirmed email before eligibility can be approved." });
     if (!result.changed) return json(res, 409, { error: "This registration has already been reviewed." });
     return json(res, 200, { voterId, status: decision });
   }
